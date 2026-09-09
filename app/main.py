@@ -6,12 +6,10 @@ Run locally with::
 """
 
 import logging
-
 from typing import Literal
 
-from pydantic import BaseModel
-
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 from app.llm import LLMError, LLMRateLimitError, MissingAPIKeyError, structured
 
@@ -28,6 +26,7 @@ app = FastAPI(
     description="Classify -> retrieve -> draft -> gate. Build 1.",
 )
 
+
 class SentimentResult(BaseModel):
     """The schema that proves the structured-output loop works.
 
@@ -40,6 +39,7 @@ class SentimentResult(BaseModel):
       JSON Schema and rejects `minimum`/`maximum` on numbers. Range checks
       belong in our own code after parsing, not in the wire schema.
     """
+
     sentiment: Literal["pos", "neg", "neutral"]
     confidence: float
 
@@ -51,6 +51,7 @@ class PingResponse(BaseModel):
     the handler's return annotation as its response model, and `dict[str, str]`
     cannot describe a `SentimentResult` sitting under `result`.
     """
+
     sentence: str
     result: SentimentResult
 
@@ -107,4 +108,3 @@ def ping_llm() -> PingResponse:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     return PingResponse(sentence=PING_SENTENCE, result=result)
-
