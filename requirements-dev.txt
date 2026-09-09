@@ -1,0 +1,3 @@
+# Dev/CI install. pyproject.toml stays the single source of truth for versions —
+# this file just points at it so `pip install -r requirements-dev.txt` works in CI.
+-e .[dev]
