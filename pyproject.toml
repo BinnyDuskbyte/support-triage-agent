@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
-    "openai>=1.60",
+    "openai>=3.10",  # Responses API: client.responses.parse, text_format, output_parsed
     "pydantic>=2.9",
     "python-dotenv>=1.0",
 ]

@@ -1,6 +1,7 @@
 import logging
 
 from openai import OpenAI, OpenAIError, RateLimitError
+from openai.types.responses import Response
 from pydantic import BaseModel, ValidationError
 
 from app.config import DEFAULT_MODEL, get_api_key
@@ -85,6 +86,24 @@ def _retry_after_seconds(exc: RateLimitError) -> int | None:
     return None
 
 
+def _refusal_text(response: Response) -> str | None:
+    """The model's refusal, if it declined to answer.
+
+    Chat Completions exposed this as a single `message.refusal` field. The
+    Responses API returns a *list* of output items instead — reasoning, tool
+    calls, messages — and a refusal is one content part inside a message item,
+    so finding it means walking two levels. Same information, more digging.
+    """
+    for item in response.output:
+        if item.type != "message":
+            continue
+        for part in item.content:
+            if part.type == "refusal":
+                return part.refusal
+
+    return None
+
+
 def build_client() -> OpenAI:
     api_key = get_api_key()
     if api_key is None:
@@ -102,9 +121,15 @@ def structured[SchemaT: BaseModel](
     client: OpenAI | None = None,
     model: str = DEFAULT_MODEL,
     system: str = DEFAULT_SYSTEM_PROMPT,
-    temperature: float = 0.0,
+    temperature: float = 0.0,  # Reasoning models (o-series, gpt-5) reject temperature entirely
+    store: bool = False,
 ) -> SchemaT:
     """Ask the model for `prompt` and return a validated instance of `schema`.
+
+    Built on the Responses API (`client.responses.parse`), not the older Chat
+    Completions endpoint. The two differ in shape rather than capability here:
+    the system prompt becomes `instructions`, `messages` becomes `input`, and
+    the answer arrives as a list of output items rather than a single message.
 
     `client` is injectable so tests can pass a stand-in and never touch the
     network. Note that we only build a real client — and therefore only require
@@ -112,6 +137,12 @@ def structured[SchemaT: BaseModel](
 
     temperature=0 because this is extraction, not writing: we want the same
     input to produce the same structured answer run after run.
+
+    `store` defaults to False, which is *not* the API's own default. Responses
+    otherwise retains the request and answer server-side for later retrieval,
+    and support tickets carry customer data we have no reason to leave sitting
+    on someone else's disk. Turn it on deliberately — for multi-turn work that
+    chains calls with `previous_response_id` — not by accident.
 
     Raises:
         MissingAPIKeyError: no key configured and no client injected.
@@ -123,14 +154,13 @@ def structured[SchemaT: BaseModel](
     client = client or build_client()
 
     try:
-        completion = client.chat.completions.parse(
+        response = client.responses.parse(
             model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-            response_format=schema,
+            instructions=system,
+            input=prompt,
+            text_format=schema,
             temperature=temperature,
+            store=store,
         )
 
     except RateLimitError as exc:
@@ -150,21 +180,30 @@ def structured[SchemaT: BaseModel](
         logger.warning("OpenAI call failed (%s): %s", type(exc).__name__, exc)
         raise LLMCallError(f"OpenAI call failed ({type(exc).__name__}): {exc}") from exc
 
-    message = completion.choices[0].message
+    refusal = _refusal_text(response)
+    if refusal:
+        raise LLMRefusalError(f"Model refused to answer: {refusal}")
 
-    if getattr(message, "refusal", None):
-        raise LLMRefusalError(f"Model refused to answer: {message.refusal}")
-
-    parsed = getattr(message, "parsed", None)
+    parsed = response.output_parsed
     if parsed is not None:
         return parsed
 
-    raw = getattr(message, "content", None)
+    # Nothing parsed. Unlike Chat Completions — where we could only guess at the
+    # cause — the Responses API states it outright, so say what actually
+    # happened instead of pointing vaguely at the token limit.
+    if response.status == "incomplete":
+        reason = getattr(response.incomplete_details, "reason", None) or "unknown"
+        raise LLMValidationError(
+            f"Model response for schema {schema.__name__} is incomplete ({reason}). "
+            "Raise max_output_tokens if the schema needs more room."
+        )
+
+    raw = response.output_text
 
     if not raw:
         raise LLMValidationError(
-            f"Model returned no parsable content for schema {schema.__name__}. "
-            "The response was likely truncated — check max_tokens."
+            f"Model returned no parsable content for schema {schema.__name__} "
+            f"(status={response.status})."
         )
 
     try:
